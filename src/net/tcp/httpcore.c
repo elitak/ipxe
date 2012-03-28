@@ -51,6 +51,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/version.h>
 #include <ipxe/params.h>
 #include <ipxe/http.h>
+#include <ipxe/proxy.h>
 
 /* Disambiguate the various error causes */
 #define EACCES_401 __einfo_error ( EINFO_EACCES_401 )
@@ -1157,6 +1158,7 @@ static void http_step ( struct http_request *http ) {
 	char *content;
 	int len;
 	int rc;
+        int parse_opts;
 
 	/* Do nothing if we have already transmitted the request */
 	if ( ! ( http->flags & HTTP_TX_PENDING ) )
@@ -1177,15 +1179,19 @@ static void http_step ( struct http_request *http ) {
 		   ( http->uri->params ? "POST" : "GET" ) );
 
 	/* Construct path?query request */
-	uri_len = ( unparse_uri ( NULL, 0, http->uri,
-				  URI_PATH_BIT | URI_QUERY_BIT )
+	if ( is_proxy_set ( ) ) {
+                parse_opts = URI_ALL;
+	} else {
+		parse_opts = URI_PATH_BIT | URI_QUERY_BIT;
+        }
+	uri_len = ( unparse_uri ( NULL, 0, http->uri, parse_opts )
 		    + 1 /* possible "/" */ + 1 /* NUL */ );
 	uri = malloc ( uri_len );
 	if ( ! uri ) {
 		rc = -ENOMEM;
 		goto err_uri;
 	}
-	unparse_uri ( uri, uri_len, http->uri, URI_PATH_BIT | URI_QUERY_BIT );
+	unparse_uri ( uri, uri_len, http->uri, parse_opts );
 	if ( ! uri[0] ) {
 		uri[0] = '/';
 		uri[1] = '\0';
@@ -1443,6 +1449,8 @@ int http_open_filter ( struct interface *xfer, struct uri *uri,
 					  const char *name,
 					  struct interface **next ) ) {
 	struct http_request *http;
+	struct sockaddr_tcpip server;
+	struct interface *socket;
 	int rc;
 
 	/* Sanity checks */
@@ -1464,7 +1472,16 @@ int http_open_filter ( struct interface *xfer, struct uri *uri,
 	http->flags = HTTP_TX_PENDING;
 
 	/* Open socket */
-	if ( ( rc = http_socket_open ( http ) ) != 0 )
+	memset ( &server, 0, sizeof ( server ) );
+	server.st_port = htons ( proxied_uri_port ( uri, default_port ) );
+	socket = &http->socket;
+	if ( filter ) {
+		if ( ( rc = filter ( socket, proxied_uri_host ( uri ), &socket ) ) != 0 )
+			goto err;
+	}
+	if ( ( rc = xfer_open_named_socket ( socket, SOCK_STREAM,
+					     ( struct sockaddr * ) &server,
+					     proxied_uri_host ( uri ), NULL ) ) != 0 )
 		goto err;
 
 	/* Attach to parent interface, mortalise self, and return */
